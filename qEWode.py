@@ -3,14 +3,15 @@ import numpy as np
 import scipy.ndimage
 import scipy.optimize
 import scipy.sparse
+import pylab
 from scipy.sparse.linalg import spsolve
 from scipy.linalg import eig, solve
+from scipy.integrate import odeint
 
 # 
-# 08-21-2012 working on qEW simulations...
-# make matrix for linear problem you want to solve
+# just raw integration of the front-- see what happens.  (do we need a threshold...?)
 # 
-# find zeros of velocity
+# later on: find zeros of velocity with matrix method?
 #
 
 class Subject:
@@ -171,7 +172,7 @@ class qEWContinuous(Subject):
         return sitesToPush, pushedarray
 
     def findDeltaW(self):
-        return self.VelocityArray.min()/self.m**2.
+        return -self.VelocityArray.min()/self.m**2.
 
     def findZero(self,x):
         # find next zero that will change the sign of the local Velocity
@@ -209,7 +210,7 @@ class qEWContinuous(Subject):
         return self.m**2*(self.w-ux) + self.gamma*laplacian    
 
 
-    def calculateVelocityArray(self, u_array):
+    def calculateVelocityArray(self, u_array, tdummy=0.0):
 
         quenched_noise = self.RFSplineArray(u_array)
         
@@ -266,143 +267,74 @@ class qEWContinuous(Subject):
 
         return c, a
 
+class storeVelocities:
+    """
+    calculate and plot average velocity at each integration time point of front
+     
+    
+    """
+    
+    def __init__(self, fileName = ""):
+        self.fileName = fileName
+        self.fileObject = open(self.fileName, "w")
+
+    def update(self, subject):
+        """
+        finish later
+        """
+        pylab.figure(101)
+        
+        pylab.figure(102)
+
+
 def main(m,N,gamma,sigma):
     
     testModel = qEWContinuous(m,N,gamma,sigma)
 
     # set initial external force equal to the most negative a_s
-    c_s, a_s = testModel.RFSplineCoeffList() 
-    #initialForce = abs(min(a_s))
-    testModel.buildMatrix()
-    # shouldn't use "findFirstMinPush" for the first av.
-    # solve for force of initial configuration 
-    initialForce, minIndex = testModel.findFirstMinPush()
-    print initialForce, minIndex
-    testModel.increaseW(initialForce/testModel.m**2)
-    #testModel.increaseW(initialForce/testModel.m**2)    
+    # increase external force slowly and solve the differential equation (monitor velocity for when avalanche stops?
+   
+    testModel.VelocityArray = testModel.calculateVelocityArray(testModel.us)
 
-    testModel.updateAllMatrix()
-    usolution = testModel.solveForUs()
+    # put external force equal to most negative velocity
+    firstW = testModel.findDeltaW()
+    print firstW
+    testModel.increaseW(firstW/2)
+    # right now this increase may be too much
 
-    print "initial solution:", usolution
-    # want to push u forward until we are happy 
-    # print warning if solutions are not within [0,1]
-    # NOTE: initial solution needs to be within range of where we expect... 
-    # how do i write this so that I can trickily ensure this happens!?!?!?!    
-    # or for now let the solutions be between (-inf,1]... 
+    # now start integrating forward until front stops (what time points should we use)
+    # determine
+    tarray = np.linspace(0.0,50.0,1000)
+    u_traj = odeint(testModel.calculateVelocityArray,testModel.us,tarray) 
 
-    if (usolution>1).any() or (usolution<0).any():
-        print "initial configuration not within range..." 
-    testModel.us = usolution.copy()
-    print "found first solution"
-    print testModel.us 
+    # record velocities, record us...    
+    # check velocities
+    #testModel.calculateVelocityArray(u_traj[-1])
+
+    #velocities = testModel.calculateVelocityArray(u_traj)
+
+    # continue if velocity is nonzero?
+    # write observers for velocity and fronts
+
+    return testModel, u_traj
+
+def plotVelocities(testModel, u_traj):
+    """
+    plot a random site's local velocity
+    also average velocities
+    """
+
+    duration, width = np.shape(u_traj)    
+
+    site_to_track = np.random.randint(0,10)
+
+    t_list = np.arange(0,duration-1,10)
+
+    velocities = [testModel.calculateVelocityArray(u_traj[t])[site_to_track] for t in t_list]    
+    average_velocities = [np.average(testModel.calculateVelocityArray(u_traj[t])) for t in t_list]
+
+    pylab.plot(velocities, 'r', label='single site velocity')
+    pylab.plot(average_velocities, 'b', label='average velocity of front')
     
-    # evolve configuration equentially
-    # 1. find minW to push by calculating velocity array
-    # 2. push that one over
-    # 3. find all other sets that would move given the push and the movement of that? or i guess i should find the next one that moves, push that... and then so on...?
-    mwpush, minIndex = testModel.findFirstMinPush() 
-    testModel.us[minIndex] = np.floor(testModel.us[minIndex]) + 1
-    u_next = np.fix(testModel.us)+1
-    u_upper = np.fix(testModel.us)+1
-    u_lower = np.fix(testModel.us)
-    testModel.updatePartialMatrix([minIndex])
-    # solve for the configuration here
-    usolution = testModel.solveForUs()
-    
-    testModel.us = usolution
 
-    # check if there is an unstable direction
-    # need to find parameters where this does go unstable...
-    print testModel.doesAvalancheHappen()
-       
- 
-    # increase w a little bit then propagate avalanche by using the most unstable direction, until another site crosses a random force threshold, or a local force is zero...
-     
-
-    return testModel
-
-"""  
-    # check if avalanche happens given this push, if not, advance another site too   
-    # this part needs to be in a while loop till the simulation reaches the end
-    while (testModel.us < 4*testModel.length).all():
-        if testModel.doesAvalancheHappen():
-            
-            #avalanche occured, so find where avalanche occurs
-            
-            avalancheEnd = False
-            listmoved, pushedarray = testModel.checkForSitesInAvalanche(u_next, mwpush)
-            while not avalancheEnd:
-                testModel.updatePartialMatrix(listmoved)
-                # see if solution stopped in range 
-                usolution = testModel.solveForUs() 
-                u_upper += 1.*(pushedarray)
-                u_lower +=1.*(pushedarray)
-                # check if solution is within proper range
-                # if not, then push over sites that should be pushed over
-                if (usolution < u_lower).any():
-                    print "solution behind range expected"
-                checksolution = (usolution<=u_upper)
-                if not checksolution.all():
-                    # where check solution is false should be pushed over too
-                    pushedarray = (checksolution*1)==0
-                    listmoved = np.where(pushedarray)[0]
-                else:
-                    #avalanche ended!, update also testModel.us with solution 
-                    avalancheEnd = True
-                    testModel.us = usolution
-        else: 
-            
-            #avalanche didn't occur, so find another and then go back
-           
-            print "avalanche didn't occur, trying to find next site to push"
-            testModel.increaseW(mwpush/testModel.m**2)
-            testModel.updateAllMatrix() # because the forces need to be updated
-            # need to use dot here instead of multiply!
-            # supposed to be 
-            #ut = lambda t: np.dot(np.dot(np.dot(scipy.linalg.inv(testModel.evects),np.diag(np.exp(testModel.evals*t))), testModel.evects), testModel.us)-testModel.rhs*t
-            ut = lambda t: solve(testModel.evects, np.diag(np.exp(testModel.evals*t))).dot(testModel.evects).dot(testModel.us) - testModel.rhs*t  
-            # evaluate ut a little bit and see who runs into u_next first?
-            # integrator not working very well yet... 
-            t = 0.0
-            increment_t = 1.0
-            sols = testModel.us
-            while (sols < u_upper).all():
-                previous_t = t
-                t += increment_t
-                sols = ut(t)
-                if np.sum(sols >= u_upper) > 1:
-                    sols = testModel.us
-                    increment_t = increment_t/2.
-                    t = previous_t
-            # now we've found which 
-            minIndex = np.where(sols >= u_upper)[0][0]            
-            #mwpush, minIndex = testModel.findFirstMinPush()
-            #testModel.us[minIndex] = np.floor(testModel.us[minIndex])+1
-            #u_next = np.fix(testModel.us)+1
-            testModel.updatePartialMatrix([minIndex])
-    
-    print "now increase w"
-    testModel.increaseW(mwpush)
-    print "solution now:", testModel.us 
-
-    print testModel.us
-    print mwpush, minIndex
-    while newpush <= mwpush:
-        listmoved.append(newmin)
-        print newmin, newpush
-        testModel.us[newmin] = np.floor(testModel.us[newmin]) + 1
-        newpush, newmin = testModel.findMinPush()
-    print testModel.us   
-    print listmoved
-    testModel.increaseW(mwpush)
-    testModel.updateAllMatrix()
-    #testModel.updatePartialMatrix(listmoved)
-    usolution = testModel.solveForUs()
-    
-    if (usolution < np.floor(testModel.us)).any() or (usolution >np.ceil(testModel.us)).any():
-        print "solution not within range"
-        # perhaps I should throw an exception here
-    else:
-        testModel.us = usolution
-"""
+    # add functionality to track velocities as a function of external force    
