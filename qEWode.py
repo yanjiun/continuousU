@@ -35,9 +35,10 @@ class Subject:
 
 
 class qEWContinuous(Subject):
-    def __init__(self,m,N,gamma,sigma):
+    def __init__(self,m,N,gamma,sigma,seed):
         Subject.__init__(self)
-        self.randmat = sigma*np.random.randn(4*N,N)
+        np.random.seed(seed)
+        self.randmat = sigma*np.random.randn(10*N,N)
         self.us = np.zeros(N)
         self.m = m
         self.w = 0.0
@@ -55,11 +56,11 @@ class qEWContinuous(Subject):
         make a self.lhs and self.rhs? 
         """
         gammaRow = np.zeros(self.length) 
-        gammaRow[0] = self.gamma
+        gammaRow[1] = self.gamma
         gammaRow[-1] = self.gamma
         a = gammaRow
         for i in range(0,self.length-1):
-            np.roll(gammaRow,1)
+            gammaRow = np.roll(gammaRow,1)
             a=np.vstack((a,gammaRow)) 
         c_s, a_s = self.RFSplineCoeffList()
         self.current_cs = c_s
@@ -287,9 +288,9 @@ class storeVelocities:
         pylab.figure(102)
 
 
-def main(m,N,gamma,sigma):
+def main(m,N,gamma,sigma,seed=1):
     
-    testModel = qEWContinuous(m,N,gamma,sigma)
+    testModel = qEWContinuous(m,N,gamma,sigma,seed)
 
     # set initial external force equal to the most negative a_s
     # increase external force slowly and solve the differential equation (monitor velocity for when avalanche stops?
@@ -298,15 +299,55 @@ def main(m,N,gamma,sigma):
 
     # put external force equal to most negative velocity
     firstW = testModel.findDeltaW()
-    print firstW
-    testModel.increaseW(firstW/2)
+    #print firstW
+    #testModel.increaseW(firstW/2)
     # right now this increase may be too much
 
     # now start integrating forward until front stops (what time points should we use)
     # determine
-    tarray = np.linspace(0.0,50.0,1000)
-    u_traj = odeint(testModel.calculateVelocityArray,testModel.us,tarray) 
+   
+    u_traj = integrateFront(testModel, firstW/2, 10.0,1000) 
+    #pylab.figure()
+    #pylab.plot(u_traj.transpose())
+    #plotTrajectories(u_traj)
+    #plotVelocities(testModel,u_traj)
+    testModel.us = u_traj[-1]
+    testModel.buildMatrix()
+    print testModel.doesAvalancheHappen()
 
+    print testModel.calculateVelocityArray(testModel.us)
+    print np.dot(testModel.lhs.todense(),testModel.us) - testModel.rhs   
+ 
+    #if testModel.doesAvalancheHappen():
+    #    u_traj_new = integrateFront(testModel,0.001/m**2,10.0,1000) 
+        #pylab.figure()
+        #pylab.plot(u_traj_new.transpose())
+    #    plotTrajectories(u_traj_new)
+    #    plotVelocities(testModel,u_traj_new)
+    #    testModel.us = u_traj_new[-1]
+    #    testModel.updateAllMatrix()
+    #    print testModel.us
+    #    print testModel.solveForUs()
+    #    print testModel.doesAvalancheHappen()
+    #    u_traj = np.concatenate((u_traj,u_traj_new))  
+    #else:
+    #    while not testModel.doesAvalancheHappen():
+    #        try:
+    #            u_traj_new = integrateFront(testModel,0.01/m**2,1.0,100)
+    #            #pylab.figure()
+    #            #pylab.plot(u_traj_new.transpose())
+    #            #plotTrajectories(u_traj_new)
+    #            #plotVelocities(testModel,u_traj_new)
+    #            testModel.us = u_traj_new[-1]
+    #            testModel.updateAllMatrix()
+    #            print testModel.us
+    #            print testModel.solveForUs()
+    #            print testModel.doesAvalancheHappen()
+    #            u_traj = np.concatenate((u_traj,u_traj_new))
+                # now increase W slowly and integrate slowly
+    #        except:
+    #            break   
+     
     # record velocities, record us...    
     # check velocities
     #testModel.calculateVelocityArray(u_traj[-1])
@@ -317,6 +358,27 @@ def main(m,N,gamma,sigma):
     # write observers for velocity and fronts
 
     return testModel, u_traj
+
+def integrateFront(testModel, Wincrements, t_end,time_steps):
+    testModel.increaseW(Wincrements) 
+    tarray = np.linspace(0.0,t_end, time_steps)        
+    u_traj = odeint(testModel.calculateVelocityArray,testModel.us,tarray)
+    # NOTE: need more elegant way to stop integration once out of range...
+    while np.average(testModel.calculateVelocityArray(u_traj[-1])) > 10**(-5):
+        print "front still going"
+        try:
+            u_traj_new = odeint(testModel.calculateVelocityArray,u_traj[-1],tarray) 
+            u_traj=np.concatenate((u_traj,u_traj_new))
+        except:
+            return u_traj   
+ 
+    return u_traj
+
+def plotTrajectories(u_traj):
+    n = len(u_traj)
+    ind = np.arange(0,int(n/10)*10,10)
+    pylab.figure()
+    pylab.plot(u_traj[ind,:].transpose())      
 
 def plotVelocities(testModel, u_traj):
     """
@@ -333,8 +395,9 @@ def plotVelocities(testModel, u_traj):
     velocities = [testModel.calculateVelocityArray(u_traj[t])[site_to_track] for t in t_list]    
     average_velocities = [np.average(testModel.calculateVelocityArray(u_traj[t])) for t in t_list]
 
+    pylab.figure()
     pylab.plot(velocities, 'r', label='single site velocity')
     pylab.plot(average_velocities, 'b', label='average velocity of front')
-    
+    pylab.legend() 
 
     # add functionality to track velocities as a function of external force    
