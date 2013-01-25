@@ -4,12 +4,12 @@ import scipy.ndimage
 import scipy.optimize
 import scipy.sparse
 import pylab
+import pyfftw
 from scipy.sparse.linalg import spsolve
 from scipy.linalg import eig, solve
 from scipy.integrate import odeint
 
 # 
-# just raw integration of the front-- see what happens.  (do we need a threshold...?)
 # 
 # later on: find zeros of velocity with matrix method?
 #
@@ -28,9 +28,9 @@ class Subject:
         except ValueError:
             pass
 
-    def notify(self, modifier=None):
+    def notify(self, exclude=None):
         for observer in self._observers:
-            if modifier != observer:
+            if observer not in exclude: # provides option to exclude some observers from being notified
                 observer.update(self)
 
 
@@ -48,6 +48,8 @@ class qEWContinuous(Subject):
         self.gamma = gamma
         self.current_cs = 0
         self.current_as = 0    
+        self.finish_run = False
+        self.u_traj = 0
 
     def buildMatrix(self):
         """
@@ -139,6 +141,21 @@ class qEWContinuous(Subject):
         mwmin = mwpushes[minIndex]
             
         return mwmin, minIndex
+
+    def findW(self,u0=None):
+        
+        if u0 is None:
+            # this solves the current
+            u0 = self.solveForUs()
+            print u0
+            
+        deltau = spsolve(self.lhs,-np.ones(self.length))
+        print "from find W deltau= ", deltau        
+
+        deltaw = (np.ceil(u0)-u0)/(self.m**2*deltau)
+        print "from find W detlaw= ", deltaw        
+
+        return min(deltaw), deltaw.argmin()
 
     def findMinPush(self):
         """
@@ -246,7 +263,7 @@ class qEWContinuous(Subject):
     def RFSplineCoeffList(self):
         
         u_lowers = np.fix(self.us)
-        u_uppers = np.fix(self.us)+1
+        u_uppers = np.fix(self.us)+1 # use np.ceil
         
         lower_fields = self.randmat.transpose()[zip(*enumerate(u_lowers))]
         upper_fields = self.randmat.transpose()[zip(*enumerate(u_uppers))]        
@@ -270,67 +287,195 @@ class qEWContinuous(Subject):
 
 class storeVelocities:
     """
-    calculate and plot average velocity at each integration time point of front
-     
-    
+    store velocities of avalanche?
     """
     
-    def __init__(self, fileName = ""):
-        self.fileName = fileName
-        self.fileObject = open(self.fileName, "w")
+    def __init__(self, fileName = "Velocities.txt"):
+        self.fileObject = open(fileName, "w")
 
-    def update(self, subject):
+    def update(self, subject, sampling_freq = 100):
         """
-        finish later
+        calculates the average velocity of the front throughout the avalanche at various time points in the avalanche
         """
-        pylab.figure(101)
+        if not self.finish_run:
+            duration, width = np.shape(subject.u_traj)    
+            t_list = np.arange(0,duration,sampling_freq)
+            average_velocities = [np.average(testModel.calculateVelocityArray(subject.u_traj[t])) for t in t_list]
+            self.store()
+        else:
+            self.fileObject.close()
+
+    def store(self):
+        """
+        stores the velocity information
+        """
+        self.fileObject.write(str(average_velocities)+"\n")
+
+
+class storeHeights:
+    """
+    store heights at the places where the front stops (so F = 0 configurations)
+    and where configuration is unstable...
+    """
+    def __init__(self, fileName = "Heights.txt"):
+        self.fileObject = open(fileName, "w")
+
+    def update(self,subject):
+        if self.finish_run:
+            self.fileObject.close()        
+        else:
+            self.fileObject.write(str(subject.us)+"\n")
+
+class storeCorrelations:
+    """
+    calculate height height correlations for each solution of the model
+    """
+    def __init__(self, subject, fileName="Correlations.pkl"):
+        self.fileName = fileName
+        self.fileObject = open(self.fileName, 'w')
+        self.correlations = np.zeros(len(subject.us))
+        self.old_heights = np.zeros(len(subject.us))
+        self.front_counter = 0
+        self.total_weight = 0
+
+    def calculate(self,subject):
+        # let's calculate the unweighted correlation for now...
+        #weight = np.sum(subject.us-self.old_heights)
+        #self.correlations += weight*np.fft.fft(subject.us)
         
-        pylab.figure(102)
+        # below is pyfftw code to be used for speed up on ept
+        #shape_tuple = subject.us.shape
+        #a = pyfftw.n_byte_align_empty(shape_tuple,16,dtype=np.complex128)
+        #b = pyfftw.n_byte_align_empty(shape_tuple,16,dtype=np.complex128)
+        #c = pyfftw.n_byte_align_empty(shape_tuple,16,dtype=np.complex128)
+
+        #fft = pyfftw.FFTW(a,b)
+    
+        #a[:] = subject.us
+        #fft.execute()
+    
+        #ifft = pyfftw.FFTW(b*b.conjugate(),c, direction="FFTW_BACKWARD")
+
+        #ifft.execute()
+
+        us_fft = np.fft.fft(subject.us) 
+        c = np.fft.ifft(us_fft*us_fft.conjugate())
+
+        av_corr = (c-np.average(subject.us))/subject.length        
+
+        self.correlations += av_corr
+        # for some reason I used to do the negative of this... why???
+        self.sum_squares += av_corr**2.       
+ 
+        self.front_counter += 1
+        #self.total_weight += weight
+
+    def update(self,subject): 
+        if not subject.finish_run:
+            self.calculate(subject) # calculate the correlation each time...
+        # think about how to store this part...        
+        if subject.finish_run:
+            self.correlations=self.correlations/self.front_counter
+            self.sum_squares = self.sum_squares/self.front_counter
+            error = np.sqrt((self.sum_squares-self.correlations**2.)/(self.front_counter-1.))
+            pickle.dump(self.fileObject,[self.correlations, error])
 
 
 def main(m,N,gamma,sigma,seed=1):
     
+    # establish simulation class
     testModel = qEWContinuous(m,N,gamma,sigma,seed)
 
-    # set initial external force equal to the most negative a_s
-    # increase external force slowly and solve the differential equation (monitor velocity for when avalanche stops?
-   
-    testModel.VelocityArray = testModel.calculateVelocityArray(testModel.us)
+    # attach observers
+    dir = 'data/'
+    commonName = 'm='+str(m) + 'N='+str(N)+'g='+str(gamma)
+    
+    heightsFile = dir + 'qEWheights' + commonName +'.txt'
+    heightsObserver = storeHeights(filename = heightsFile)
+    velocitiesFile = dir + 'qEWvelocities' + commonName + '.txt'
+    velocitiesObserver = storeVelocities(filename = velocitiesFile)
+    correlationsFile = dir + 'qEWcorr'+commonName +'.bp'
+    corrObserver = storeCorrelations(filename = correlationsFile)
+    
+    testModel.attach(heightsObserver)
+    testModel.attach(velocitiesObserver)
+    testModel.attach(corrObserver)
 
+    # set initial external force equal to the most negative a_s
+    # increase external force slowly and solve the differential equation (monitor velocity for when avalanche stops
+
+    testModel.VelocityArray = testModel.calculateVelocityArray(testModel.us)
+    firstW = testModel.findDeltaW() # this finds the most negative a_s
+
+    #testModel.buildMatrix()
     # put external force equal to most negative velocity
-    firstW = testModel.findDeltaW()
-    #print firstW
+    # not optimal -- try pushing less, or more intelligently...
+    #firstW, argchanged = testModel.findW()
+   
     #testModel.increaseW(firstW/2)
-    # right now this increase may be too much
 
     # now start integrating forward until front stops (what time points should we use)
     # determine
-   
-    u_traj = integrateFront(testModel, firstW/2, 10.0,1000) 
+
+    # the integrateFront function integrates outside of the class... 
+    # conisder logic   
+    testModel.u_traj, topReached = integrateFront(testModel, firstW/2, 10.0,1000) 
     #pylab.figure()
     #pylab.plot(u_traj.transpose())
-    #plotTrajectories(u_traj)
+    plotTrajectories(testModel.u_traj)
     #plotVelocities(testModel,u_traj)
     testModel.us = u_traj[-1]
     testModel.buildMatrix()
-    print testModel.doesAvalancheHappen()
+    #print "testModel.us from main: ", testModel.us
+    #print testModel.doesAvalancheHappen()
 
-    print testModel.calculateVelocityArray(testModel.us)
-    print np.dot(testModel.lhs.todense(),testModel.us) - testModel.rhs   
- 
-    #if testModel.doesAvalancheHappen():
-    #    u_traj_new = integrateFront(testModel,0.001/m**2,10.0,1000) 
-        #pylab.figure()
-        #pylab.plot(u_traj_new.transpose())
-    #    plotTrajectories(u_traj_new)
-    #    plotVelocities(testModel,u_traj_new)
-    #    testModel.us = u_traj_new[-1]
-    #    testModel.updateAllMatrix()
-    #    print testModel.us
-    #    print testModel.solveForUs()
-    #    print testModel.doesAvalancheHappen()
-    #    u_traj = np.concatenate((u_traj,u_traj_new))  
-    #else:
+    #print testModel.calculateVelocityArray(testModel.us)
+    #print np.dot(testModel.lhs.todense(),testModel.us) - testModel.rhs   
+
+    deltaw, argchanged = testModel.findW()
+
+    testModel.increaseW(deltaw)
+    testModel.rhs = testModel.rhs - testModel.m**2*deltaw
+    # line above should be consolidated in increaseW? (does ODE solver depend on this?)
+    testModel.us = testModel.solveForUs()
+    testModel.us[argchanged] = np.ceil(testModel.us[argchanged])
+    testModel.updatePartialMatrix([argchanged])
+
+    #print testModel.doesAvalancheHappen()
+    print topReached
+
+
+    while not (testModel.us >= (testModel.length*10-1)).any() and topReached is False:
+        # repeat this portion until end of the system...
+        if testModel.doesAvalancheHappen():
+            print "avalanche happened!"
+            # if avalanche happens, notify observers
+            testModel.notify() # observers can be skipped...
+            # if avalanche happens, push front a little bit...
+            u_traj_new, topReached = integrateFront(testModel,0.001/m**2,10.0,1000) 
+            #plotTrajectories(u_traj_new)
+            #plotVelocities(testModel,u_traj_new)
+            if not topReached:
+                testModel.us = u_traj_new[-1]
+                testModel.u_traj = u_traj_new
+                testModel.updateAllMatrix()
+                testModel.us = testModel.solveForUs()
+                testModel.notify(exclude = [heightsObserver, corrObserver])
+            else:
+                testModel.finish_run = True
+                testModel.notify()
+            #u_traj = np.concatenate((u_traj,u_traj_new))  
+        else:
+            print "front creeping"
+            deltaw, argchanged = testModel.findW() 
+            testModel.increaseW(deltaw)
+            testModel.rhs = testModel.rhs - testModel.m**2*deltaw        
+            testModel.us = testModel.solveForUs()
+            testModel.us[argchanged] = np.ceil(testModel.us[argchanged])
+            testModel.updatePartialMatrix([argchanged])
+    
+         
+    
     #    while not testModel.doesAvalancheHappen():
     #        try:
     #            u_traj_new = integrateFront(testModel,0.01/m**2,1.0,100)
@@ -348,31 +493,34 @@ def main(m,N,gamma,sigma,seed=1):
     #        except:
     #            break   
      
-    # record velocities, record us...    
-    # check velocities
-    #testModel.calculateVelocityArray(u_traj[-1])
 
-    #velocities = testModel.calculateVelocityArray(u_traj)
+    
 
-    # continue if velocity is nonzero?
-    # write observers for velocity and fronts
-
-    return testModel, u_traj
+    #return testModel, u_traj
 
 def integrateFront(testModel, Wincrements, t_end,time_steps):
     testModel.increaseW(Wincrements) 
     tarray = np.linspace(0.0,t_end, time_steps)        
     u_traj = odeint(testModel.calculateVelocityArray,testModel.us,tarray)
     # NOTE: need more elegant way to stop integration once out of range...
+    topReached = False
     while np.average(testModel.calculateVelocityArray(u_traj[-1])) > 10**(-5):
         print "front still going"
         try:
             u_traj_new = odeint(testModel.calculateVelocityArray,u_traj[-1],tarray) 
             u_traj=np.concatenate((u_traj,u_traj_new))
+            if (u_traj[-1]>=(testModel.length*10-1)).any():
+                print "from integrateFront last trajectory: ", u_traj[-1]
+                topReached = True
+                return u_traj, topReached
         except:
-            return u_traj   
- 
-    return u_traj
+            print "exception occured"
+            topReached = True
+            return u_traj, topReached    
+
+    return u_traj, topReached
+
+# Note: should I make another class the interacts with both subject and observer to do plotting?
 
 def plotTrajectories(u_traj):
     n = len(u_traj)
