@@ -4,10 +4,11 @@ import scipy.ndimage
 import scipy.optimize
 import scipy.sparse
 import pylab
-import pyfftw
+import pickle
+#import pyfftw
 from scipy.sparse.linalg import spsolve
 from scipy.linalg import eig, solve
-from scipy.integrate import odeint
+from scipy.integrate import ode, odeint
 
 # 
 # 
@@ -28,7 +29,7 @@ class Subject:
         except ValueError:
             pass
 
-    def notify(self, exclude=None):
+    def notify(self, exclude=[]):
         for observer in self._observers:
             if observer not in exclude: # provides option to exclude some observers from being notified
                 observer.update(self)
@@ -147,13 +148,13 @@ class qEWContinuous(Subject):
         if u0 is None:
             # this solves the current
             u0 = self.solveForUs()
-            print u0
+            #print u0
             
         deltau = spsolve(self.lhs,-np.ones(self.length))
-        print "from find W deltau= ", deltau        
-
-        deltaw = (np.ceil(u0)-u0)/(self.m**2*deltau)
-        print "from find W detlaw= ", deltaw        
+        #print "from find W deltau= ", deltau        
+        
+        deltaw = ((np.floor(u0)+1.)-u0)/(self.m**2*deltau)
+        #print "from find W detlaw= ", deltaw        
 
         return min(deltaw), deltaw.argmin()
 
@@ -234,6 +235,10 @@ class qEWContinuous(Subject):
         
         return self.calculateFharmArray(u_array)+quenched_noise
 
+    def odeFunc(self, t, u_array):
+        
+        return self.calculateVelocityArray(u_array)
+
     def calculateFharmArray(self,u_array):
         laplacian = scipy.ndimage.convolve1d(u_array,[1,-2,1],mode='wrap')
     
@@ -297,19 +302,19 @@ class storeVelocities:
         """
         calculates the average velocity of the front throughout the avalanche at various time points in the avalanche
         """
-        if not self.finish_run:
+        if not subject.finish_run:
             duration, width = np.shape(subject.u_traj)    
             t_list = np.arange(0,duration,sampling_freq)
-            average_velocities = [np.average(testModel.calculateVelocityArray(subject.u_traj[t])) for t in t_list]
-            self.store()
+            average_velocities = [np.average(subject.calculateVelocityArray(subject.u_traj[t])) for t in t_list]
+            self.store(average_velocities)
         else:
             self.fileObject.close()
 
-    def store(self):
+    def store(self,velocities):
         """
         stores the velocity information
         """
-        self.fileObject.write(str(average_velocities)+"\n")
+        self.fileObject.write(str(velocities)+"\n")
 
 
 class storeHeights:
@@ -317,26 +322,43 @@ class storeHeights:
     store heights at the places where the front stops (so F = 0 configurations)
     and where configuration is unstable...
     """
-    def __init__(self, fileName = "Heights.txt"):
+    def __init__(self, fileName = "Heights.pkl"):
         self.fileObject = open(fileName, "w")
+        self.fileName = fileName
 
     def update(self,subject):
-        if self.finish_run:
-            self.fileObject.close()        
-        else:
-            self.fileObject.write(str(subject.us)+"\n")
+        if not subject.finish_run:
+            with open(self.fileName,"a") as file:
+                pickle.dump(subject.us,file)                
+
+class storeSolutions:
+    """
+    stores the solutions just before an avalanche. 
+    and the end of avalanche (integration solution and matrix solution)
+    so sequence goes start, end_int, end_sol
+    """
+    def __init__(self, fileName = "Solutions.pkl"):
+        self.fileName = fileName
+    
+    def update(self,subject):
+        if not subject.finish_run:
+            with open(self.fileName, "a") as file:
+                pickle.dump(subject.us,file)
 
 class storeCorrelations:
     """
     calculate height height correlations for each solution of the model
     """
-    def __init__(self, subject, fileName="Correlations.pkl"):
+    def __init__(self, skip, fileName="Correlations.pkl"):
         self.fileName = fileName
         self.fileObject = open(self.fileName, 'w')
-        self.correlations = np.zeros(len(subject.us))
-        self.old_heights = np.zeros(len(subject.us))
+        self.correlations = 0
+        #self.old_heights = np.zeros(len(subject.us))
         self.front_counter = 0
         self.total_weight = 0
+        self.skip_fronts = skip
+        self.update_counter = 0
+        self.sum_squares = 0
 
     def calculate(self,subject):
         # let's calculate the unweighted correlation for now...
@@ -371,14 +393,18 @@ class storeCorrelations:
         #self.total_weight += weight
 
     def update(self,subject): 
-        if not subject.finish_run:
+        self.update_counter += 1
+        if self.update_counter == self.skip_fronts:
+            self.correlations = np.zeros(subject.length)
+        if not subject.finish_run and self.update_counter > self.skip_fronts:
             self.calculate(subject) # calculate the correlation each time...
         # think about how to store this part...        
         if subject.finish_run:
+            
             self.correlations=self.correlations/self.front_counter
             self.sum_squares = self.sum_squares/self.front_counter
             error = np.sqrt((self.sum_squares-self.correlations**2.)/(self.front_counter-1.))
-            pickle.dump(self.fileObject,[self.correlations, error])
+            pickle.dump([self.correlations, error], self.fileObject)
 
 
 def main(m,N,gamma,sigma,seed=1):
@@ -388,19 +414,21 @@ def main(m,N,gamma,sigma,seed=1):
 
     # attach observers
     dir = 'data/'
-    commonName = 'm='+str(m) + 'N='+str(N)+'g='+str(gamma)
+    commonName = '_VODE_m'+str(m) + '_N'+str(N)+'_g'+str(gamma)+"_s"+str(seed)
     
-    heightsFile = dir + 'qEWheights' + commonName +'.txt'
-    heightsObserver = storeHeights(filename = heightsFile)
+    heightsFile = dir + 'qEWheights' + commonName +'.pkl'
+    heightsObserver = storeHeights(fileName = heightsFile)
     velocitiesFile = dir + 'qEWvelocities' + commonName + '.txt'
-    velocitiesObserver = storeVelocities(filename = velocitiesFile)
+    velocitiesObserver = storeVelocities(fileName = velocitiesFile)
     correlationsFile = dir + 'qEWcorr'+commonName +'.bp'
-    corrObserver = storeCorrelations(filename = correlationsFile)
-    
+    corrObserver = storeCorrelations(0,fileName = correlationsFile)
+    solutionsFile = dir + 'qEWsolutions' + commonName + '.pkl'
+    solutionsObserver = storeSolutions(fileName = solutionsFile)   
+ 
     testModel.attach(heightsObserver)
     testModel.attach(velocitiesObserver)
     testModel.attach(corrObserver)
-
+    testModel.attach(solutionsObserver)
     # set initial external force equal to the most negative a_s
     # increase external force slowly and solve the differential equation (monitor velocity for when avalanche stops
 
@@ -422,9 +450,9 @@ def main(m,N,gamma,sigma,seed=1):
     testModel.u_traj, topReached = integrateFront(testModel, firstW/2, 10.0,1000) 
     #pylab.figure()
     #pylab.plot(u_traj.transpose())
-    plotTrajectories(testModel.u_traj)
+    #plotTrajectories(testModel.u_traj)
     #plotVelocities(testModel,u_traj)
-    testModel.us = u_traj[-1]
+    testModel.us = testModel.u_traj[-1]
     testModel.buildMatrix()
     #print "testModel.us from main: ", testModel.us
     #print testModel.doesAvalancheHappen()
@@ -458,6 +486,7 @@ def main(m,N,gamma,sigma,seed=1):
             if not topReached:
                 testModel.us = u_traj_new[-1]
                 testModel.u_traj = u_traj_new
+                testModel.notify(exclude = [heightsObserver, corrObserver,velocitiesObserver])
                 testModel.updateAllMatrix()
                 testModel.us = testModel.solveForUs()
                 testModel.notify(exclude = [heightsObserver, corrObserver])
@@ -473,7 +502,7 @@ def main(m,N,gamma,sigma,seed=1):
             testModel.us = testModel.solveForUs()
             testModel.us[argchanged] = np.ceil(testModel.us[argchanged])
             testModel.updatePartialMatrix([argchanged])
-    
+            # bug in front creeping part?  doesn't change properly? 
          
     
     #    while not testModel.doesAvalancheHappen():
@@ -499,26 +528,48 @@ def main(m,N,gamma,sigma,seed=1):
     #return testModel, u_traj
 
 def integrateFront(testModel, Wincrements, t_end,time_steps):
+    # modify integrator so that it integrates in steps 
     testModel.increaseW(Wincrements) 
-    tarray = np.linspace(0.0,t_end, time_steps)        
-    u_traj = odeint(testModel.calculateVelocityArray,testModel.us,tarray)
+    tarray = np.linspace(0.0,t_end, time_steps)  
+    dt = tarray[1]-tarray[0]      
+    u_traj, topReached = odeIntegrator(testModel.odeFunc,testModel.us,t_end,dt)
+    #u_traj = odeint(testModel.calculateVelocityArray,testModel.us,tarray)
     # NOTE: need more elegant way to stop integration once out of range...
-    topReached = False
-    while np.average(testModel.calculateVelocityArray(u_traj[-1])) > 10**(-5):
-        print "front still going"
-        try:
-            u_traj_new = odeint(testModel.calculateVelocityArray,u_traj[-1],tarray) 
-            u_traj=np.concatenate((u_traj,u_traj_new))
-            if (u_traj[-1]>=(testModel.length*10-1)).any():
-                print "from integrateFront last trajectory: ", u_traj[-1]
-                topReached = True
-                return u_traj, topReached
-        except:
-            print "exception occured"
-            topReached = True
-            return u_traj, topReached    
+    if not topReached:
+        while np.average(testModel.calculateVelocityArray(u_traj[-1])) > 10**(-5):
+            print "front still going"
+            u_traj_new, topReached = odeIntegrator(testModel.odeFunc,u_traj[-1],t_end,dt)
+            if topReached:
+                break
+            else:
+                u_traj = np.concatenate((u_traj,u_traj_new))
 
     return u_traj, topReached
+
+
+def odeIntegrator(func, u0, tend, dt):
+    # figure out if problem is stiff or non-stiff (this decides which method...)
+    r = ode(func).set_integrator('vode', method = 'bdf')
+    #r = ode(func).set_integrator('dopri5')
+    r.set_initial_value(u0, 0.0)
+    u_traj = u0
+    topReached = False
+    while r.successful() and r.t < tend:
+        try:
+            r.integrate(r.t+dt)
+            u_traj = np.vstack((u_traj,np.array(r.y))) 
+        except:
+            print r.successful()
+            topReached = True  
+            break
+    # put in option to only return part of the trajectory later
+    
+    if not r.successful():
+        topReached = True
+
+    return u_traj, topReached    
+
+    
 
 # Note: should I make another class the interacts with both subject and observer to do plotting?
 
@@ -549,3 +600,4 @@ def plotVelocities(testModel, u_traj):
     pylab.legend() 
 
     # add functionality to track velocities as a function of external force    
+
